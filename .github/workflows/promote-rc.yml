@@ -1,0 +1,99 @@
+name: promote-rc
+
+on:
+  workflow_dispatch:
+    inputs:
+      change_id:
+        description: "ID del Cambio (ej: 10234)"
+        required: true
+      merge_shas:
+        description: "SHAs (uno por línea) de los PR/commits que quieres promover a QA"
+        required: true
+      change_title:
+        description: "Slug legible (opcional, ej: 'ajuste-cobol-mencons')"
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create_rc_pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Config Git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Preparar rama RC desde staging y cherry-pick
+        id: rc
+        env:
+          ID: ${{ inputs.change_id }}
+          MERGES: ${{ inputs.merge_shas }}
+          TITLE: ${{ inputs.change_title }}
+        run: |
+          set -euo pipefail
+          mk_slug () {
+            echo "$1" | tr '[:upper:]' '[:lower:]' \
+                      | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' \
+                      | cut -c1-50
+          }
+          SLUG=""
+          if [ -n "${TITLE:-}" ]; then
+            S=$(mk_slug "$TITLE"); [ -n "$S" ] && SLUG="-$S"
+          fi
+
+          BRANCH="rc/${ID}${SLUG}"
+
+          git fetch --all --prune
+          git checkout -B "${BRANCH}" origin/staging
+
+          while IFS= read -r SHA; do
+            [ -z "$SHA" ] && continue
+            PARENTS=$(git rev-list --parents -n 1 "$SHA" | awk '{print NF}')
+            if [ "$PARENTS" -gt 2 ]; then
+              git cherry-pick -x -m 1 "$SHA"
+            else
+              git cherry-pick -x "$SHA"
+            fi
+          done <<< "$MERGES"
+
+          git push -u origin "${BRANCH}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Abrir PR a staging (RC)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = "${{ steps.rc.outputs.branch }}";
+            const id = "${{ inputs.change_id }}";
+            const title = `RC ${id} (Mencons – Cobol)`;
+            const body  = [
+              `Promoción controlada de **${id}** a QA (base: staging).`,
+              "",
+              "- Incluye únicamente los SHAs cherry-picked indicados en el dispatch.",
+              "- Tras aprobar QA, corre 'promote-prod-auto.yml' con el mismo ID."
+            ].join("\n");
+            const pr = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              head: branch,
+              base: "staging",
+              body,
+              draft: false
+            });
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.data.number,
+                labels: ["RC", "QA", id]
+              });
+            } catch(e) {}
