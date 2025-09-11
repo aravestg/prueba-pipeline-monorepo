@@ -1,0 +1,115 @@
+name: promote-prod-auto
+
+on:
+  workflow_dispatch:
+    inputs:
+      change_id:
+        description: "ID del Cambio (solo número, ej: 10234)"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Resolver PR de staging por ID de cambio
+        id: find
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const id = "${{ inputs.change_id }}";
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // PRs cerrados con base=staging
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: "closed", base: "staging", per_page: 100
+            });
+
+            const prefix = `rc/${id}-`;
+            const candidates = prs.filter(pr =>
+              pr.merged_at && pr.head?.ref?.startsWith(prefix)
+            ).sort((a,b) => new Date(b.merged_at) - new Date(a.merged_at));
+
+            if (candidates.length === 0) {
+              core.setFailed(`No encontré PRs MERGED en 'staging' con head.ref que inicie con '${prefix}'.`);
+              return;
+            }
+
+            const pr = candidates[0];
+            core.setOutput("merge_sha", pr.merge_commit_sha);
+            core.setOutput("head_ref", pr.head.ref);   // rc/<id>-<slug>
+            core.setOutput("slug", pr.head.ref.substring(prefix.length));
+            core.setOutput("pr_number", pr.number.toString());
+            core.setOutput("pr_url", pr.html_url);
+
+      - name: Preparar rama prod y cherry-pick
+        id: prep
+        env:
+          ID: ${{ inputs.change_id }}
+          SLUG: ${{ steps.find.outputs.slug }}
+          MERGE_SHA: ${{ steps.find.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          BRANCH="prod/${ID}-${SLUG}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch --all --prune
+          git checkout -B "${BRANCH}" origin/production
+
+          # ¿Es merge commit? (>=2 padres) => usar -m 1
+          PARENTS=$(git rev-list --parents -n 1 "$MERGE_SHA" | awk '{print NF}')
+          if [ "$PARENTS" -gt 2 ]; then
+            git cherry-pick -x -m 1 "$MERGE_SHA"
+          else
+            git cherry-pick -x "$MERGE_SHA"
+          fi
+
+          git push -u origin "${BRANCH}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Abrir PR a production
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = "${{ steps.prep.outputs.branch }}";
+            const id = "${{ inputs.change_id }}";
+            const slug = "${{ steps.find.outputs.slug }}";
+            const fromPr = "${{ steps.find.outputs.pr_number }}";
+            const title = `PROD ${id}-${slug} (desde PR #${fromPr} en staging)`;
+            const body  = [
+              `Promoción a Producción de **${id}-${slug}**.`,
+              `Fuente: PR #${fromPr} en *staging*: ${{ steps.find.outputs.pr_url }}`,
+              "",
+              "**Notas**:",
+              "- Cherry-pick automático del commit (merge/squash) que entró a staging.",
+              "- Revisores obligatorios: CAB/Operaciones según CODEOWNERS."
+            ].join("\n");
+            const pr = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              head: branch,
+              base: "production",
+              body,
+              draft: false
+            });
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.data.number,
+                labels: ["PROD", id]
+              });
+            } catch(e) {}
+            core.notice(`PR creado: ${pr.data.html_url}`);
