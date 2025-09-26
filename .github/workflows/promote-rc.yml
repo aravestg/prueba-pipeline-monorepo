@@ -4,97 +4,188 @@ on:
   workflow_dispatch:
     inputs:
       change_id:
-        description: "ID del Cambio (ej: 10234)"
+        description: "ID del cambio (Azure DevOps)"
         required: true
       merge_shas:
-        description: "SHAs (uno por línea) de los PR/commits que quieres promover a QA"
+        description: "SHAs (uno por línea) a promover a QA"
         required: true
       change_title:
-        description: "Slug legible (opcional, ej: 'ajuste-cobol-mencons')"
+        description: "Breve descripción (ej: 'ajuste-cobol-mencons')"
+        required: true
+      existing_branch:
+        description: "Rama RC existente (opcional, ej: rc/10234-ajuste-cobol)"
         required: false
+      impact:
+        description: "Tipo de incremento versión"
+        required: true
+        type: choice
+        options:
+          - minor
+          - major
+          - patch
+        default: patch
+      seq:
+        description: "Correlativo 2 dígitos (ej: 01, 02, 10)"
+        required: true
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  create_rc_pr:
+  create_or_update_rc_pr:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           lfs: true
+          token: ${{ secrets.PR_AUTOMATION_TOKEN }}
 
       - name: Config Git
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Preparar rama RC desde staging y cherry-pick
+      - name: Preparar rama (reusar si existe)
         id: rc
         env:
           ID: ${{ inputs.change_id }}
-          MERGES: ${{ inputs.merge_shas }}
           TITLE: ${{ inputs.change_title }}
+          EXISTING: ${{ inputs.existing_branch }}
         run: |
           set -euo pipefail
+
           mk_slug () {
             echo "$1" | tr '[:upper:]' '[:lower:]' \
-                      | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' \
-                      | cut -c1-50
+              | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-50
           }
-          SLUG=""
-          if [ -n "${TITLE:-}" ]; then
-            S=$(mk_slug "$TITLE"); [ -n "$S" ] && SLUG="-$S"
-          fi
-
-          BRANCH="rc/${ID}${SLUG}"
 
           git fetch --all --prune
-          git checkout -B "${BRANCH}" origin/staging
 
+          if [ -n "${EXISTING:-}" ]; then
+            BR="${EXISTING}"
+            case "$BR" in
+              rc/*) : ;;
+              *) echo "::error::La rama existente debe comenzar con 'rc/'"; exit 2 ;;
+            esac
+            if git ls-remote --heads origin "$BR" >/dev/null 2>&1 && \
+               [ -n "$(git ls-remote --heads origin "$BR")" ]; then
+              git checkout -B "$BR" "origin/$BR"
+            else
+              echo "::error::La rama '$BR' no existe en remoto (origin)"; exit 3
+            fi
+          else
+            S=""
+            if [ -n "${TITLE:-}" ]; then
+              SL=$(mk_slug "$TITLE"); [ -n "$SL" ] && S="-$SL"
+            fi
+            BR="rc/${ID}${S}"
+            git checkout -B "$BR" origin/staging
+          fi
+
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
+
+
+      - name: Cherry-pick de SHAs
+        env:
+          MERGES: ${{ inputs.merge_shas }}
+        run: |
+          set -euo pipefail
           while IFS= read -r SHA; do
             [ -z "$SHA" ] && continue
             PARENTS=$(git rev-list --parents -n 1 "$SHA" | awk '{print NF}')
             if [ "$PARENTS" -gt 2 ]; then
-              git cherry-pick -x -m 1 "$SHA"
+              git cherry-pick -x -m 1 "$SHA" || {
+                # Si ya está aplicado, intenta skip; si hay conflicto real, falla
+                git status
+                git cherry-pick --skip || (echo "::error::Conflicto en $SHA"; exit 1)
+              }
             else
-              git cherry-pick -x "$SHA"
+              git cherry-pick -x "$SHA" || {
+                git status
+                git cherry-pick --skip || (echo "::error::Conflicto en $SHA"; exit 1)
+              }
             fi
           done <<< "$MERGES"
+          
 
-          git push -u origin "${BRANCH}"
-          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+      - name: Push rama
+        run: git push -u origin "${{ steps.rc.outputs.branch }}"
 
-      - name: Abrir PR a staging (RC)
+      - name: Crear o reutilizar PR a staging (título + correlativo único)
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.PR_AUTOMATION_TOKEN }}
           script: |
-            const branch = "${{ steps.rc.outputs.branch }}";
-            const id = "${{ inputs.change_id }}";
-            const title = `RC ${id} (Mencons – Cobol)`;
-            const body  = [
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const headRef = "${{ steps.rc.outputs.branch }}";
+
+            const id       = "${{ inputs.change_id }}".trim();
+            const impact   = "${{ inputs.impact }}".trim().toLowerCase();
+            const seqRaw   = "${{ inputs.seq }}".trim();
+            const descRaw  = "${{ inputs.change_title }}";
+
+            const mkSlug = s => (s||"").toString().trim().toLowerCase()
+              .replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,50);
+            const breveDesc = mkSlug(descRaw || headRef.replace(/^rc\/\d+-/,''));
+            const seq = /^\d{1,2}$/.test(seqRaw) ? seqRaw.padStart(2,"0") : "01";
+            const prTitle = `[staging] Feature: ${id}-${breveDesc}-${seq} [${impact}]`;
+
+            // ¿Existe PR abierto desde la misma rama? si sí, se reutiliza
+            const openPRs = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: "open", base: "staging", per_page: 100
+            });
+            const existing = openPRs.find(pr => pr.head.ref === headRef);
+
+            // --- Regla de unicidad del correlativo por ID (open/closed/merged) ---
+            const allPRs = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: "all", base: "staging", per_page: 100
+            });
+            const reExact = new RegExp(`^\$begin:math:display$staging\\$end:math:display$\\s+Feature:\\s+${id}-[a-z0-9-]+-${seq}\\s+\$begin:math:display$(?:minor|major|patch)\\$end:math:display$$`);
+            const reAny   = new RegExp(`^\$begin:math:display$staging\\$end:math:display$\\s+Feature:\\s+${id}-[a-z0-9-]+-(\\d{2})\\s+\$begin:math:display$(?:minor|major|patch)\\$end:math:display$$`);
+
+            // Duplicados del mismo ID+seq (excluye el PR que reutilizaremos si aplica)
+            const dupPRs = allPRs.filter(pr => reExact.test(pr.title) && (!existing || pr.number !== existing.number));
+            if (dupPRs.length) {
+              const used = allPRs
+                .map(pr => (pr.title.match(reAny) || [])[1])
+                .filter(Boolean)
+                .map(n => parseInt(n,10));
+              const top = used.length ? Math.max(...used) : 0;
+              const suggested = String(Math.max(top, parseInt(seq,10)) + 1).padStart(2,"0");
+              core.setFailed(`Correlativo '${seq}' ya usado para el ID '${id}' en ${dupPRs.map(d => '#'+d.number).join(', ')}. Usa un correlativo mayor (sugerido: ${suggested}).`);
+              return;
+            }
+
+            const body = [
               `Promoción controlada de **${id}** a QA (base: staging).`,
               "",
-              "- Incluye únicamente los SHAs cherry-picked indicados en el dispatch.",
-              "- Tras aprobar QA, corre 'promote-prod-auto.yml' con el mismo ID."
+              "- Título normalizado: `[staging] Feature: <ID>-<breve-descripcion>-<NN> [impact]`.",
+              "- Correlativo único por ID en staging.",
+              "- Tras aprobar QA, usa el workflow de promoción a producción."
             ].join("\n");
+
+            if (existing) {
+              if (existing.title !== prTitle) {
+                await github.rest.pulls.update({ owner, repo, pull_number: existing.number, title: prTitle });
+              }
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: "Actualizado automáticamente: título normalizado; correlativo verificado como único."
+              });
+              core.notice(`PR reutilizado: ${existing.html_url}`);
+              return;
+            }
+
             const pr = await github.rest.pulls.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title,
-              head: branch,
-              base: "staging",
-              body,
-              draft: false
+              owner, repo, title: prTitle, head: headRef, base: "staging", body, draft: false
             });
             try {
               await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: pr.data.number,
-                labels: ["RC", "QA", id]
+                owner, repo, issue_number: pr.data.number,
+                labels: ["RC","QA", id]
               });
-            } catch(e) {}
+            } catch (e) {}
+            core.notice(`PR creado: ${pr.data.html_url}`);
