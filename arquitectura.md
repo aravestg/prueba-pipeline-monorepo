@@ -1,0 +1,4 @@
+- `src/` fuentes
+- `deploy/` instalables
+- `scripts/` utilidades
+- `.github/workflows/` pipeline único
