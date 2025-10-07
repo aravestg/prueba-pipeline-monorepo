@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="980" height="220" viewBox="0 0 980 220" xmlns="http://www.w3.org/2000/svg">
+  <rect width="100%%" height="100%%" fill="#ffffff"/>
+  <path d="M40 70 C 160 70, 240 70, 320 70 S 480 70, 640 70 S 760 70, 920 70"
+        fill="none" stroke="#2f3b52" stroke-width="6"/>
+  <path d="M200 150 C 280 150, 360 150, 440 150 S 520 150, 600 150 S 680 150, 720 110 S 760 90, 900 70"
+        fill="none" stroke="#2e7d32" stroke-width="6"/>
+  <circle cx="40" cy="70" r="12" fill="#a7c4ff" stroke="#2f3b52" stroke-width="3"/>
+  <circle cx="180" cy="70" r="12" fill="#a7c4ff" stroke="#2f3b52" stroke-width="3"/>
+  <circle cx="360" cy="70" r="12" fill="#a7c4ff" stroke="#2f3b52" stroke-width="3"/>
+  <circle cx="640" cy="70" r="12" fill="#a7c4ff" stroke="#2f3b52" stroke-width="3"/>
+  <circle cx="920" cy="70" r="12" fill="#a7c4ff" stroke="#2f3b52" stroke-width="3"/>
+  <circle cx="200" cy="150" r="12" fill="#9be7a8" stroke="#2e7d32" stroke-width="3"/>
+  <circle cx="320" cy="150" r="12" fill="#9be7a8" stroke="#2e7d32" stroke-width="3"/>
+  <circle cx="520" cy="150" r="12" fill="#9be7a8" stroke="#2e7d32" stroke-width="3"/>
+  <circle cx="600" cy="150" r="12" fill="#9be7a8" stroke="#2e7d32" stroke-width="3"/>
+  <g>
+  <rect x="20" y="34" width="180" height="24" rx="4" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="28" y="48" font-size="12" fill="#1e3a8a">Base común (production)</text>
+</g>
+  <g>
+  <rect x="165" y="34" width="180" height="24" rx="4" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="173" y="48" font-size="12" fill="#1e3a8a">Punta main (development/staging)</text>
+</g>
+  <g>
+  <rect x="735" y="34" width="180" height="24" rx="4" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="743" y="48" font-size="12" fill="#1e3a8a">PR → production (Squash) → R1</text>
+</g>
+  <g>
+  <rect x="150" y="148" width="180" height="24" rx="4" fill="#e8f5e9" stroke="#a5d6a7"/>
+  <text x="158" y="162" font-size="12" fill="#1b5e20">feature/* creada desde production</text>
+</g>
+  <g>
+  <rect x="685" y="98" width="180" height="24" rx="4" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="693" y="112" font-size="12" fill="#1e3a8a">PR → staging (merge estándar)</text>
+</g>
+</svg>
